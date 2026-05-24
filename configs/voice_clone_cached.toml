@@ -1,0 +1,32 @@
+# Qwen3-TTS cached no-transcript voice clone config.
+# Command-line options override values here.
+
+model = "models/Qwen3-TTS-12Hz-1.7B-Base"
+
+# Replace this with your reference audio file path.
+ref_audio = "samples/reference.wav"
+
+# The first run creates this cache. Later runs reuse it.
+cache = "caches/my_voice.pt"
+
+# Target text can also be "@path/to/text.txt".
+text = "你好，这是用参考音频音色生成的中文语音。"
+
+output = "outputs/result.wav"
+language = "Chinese"
+device = "cuda:0"
+dtype = "bfloat16"
+attn_implementation = "eager"
+
+force_rebuild = false
+max_new_tokens = 2048
+top_k = 50
+top_p = 1.0
+temperature = 0.9
+repetition_penalty = 1.05
+
+# Set true only for local smoke tests that do not load Qwen3-TTS.
+mock = false
+
+# Set true to print reference-audio duration/sample metadata and exit.
+inspect_ref_audio = false
