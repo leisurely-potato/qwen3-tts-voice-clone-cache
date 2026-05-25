@@ -16,7 +16,7 @@ output = "outputs/result.wav"
 language = "Chinese"
 device = "cuda:0"
 dtype = "bfloat16"
-attn_implementation = "eager"
+attn_implementation = "flash_attention_2"
 
 force_rebuild = false
 max_new_tokens = 2048

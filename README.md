@@ -50,7 +50,7 @@ samples/
 - Qwen3-TTS model weights downloaded locally or accessible from ModelScope/Hugging Face
 - `uv` for environment management
 
-`flash-attn` is optional. The script works with the default `eager` attention implementation. Installing `flash-attn` requires a CUDA Toolkit development environment with `nvcc` and `CUDA_HOME`.
+`flash-attn` is optional but recommended for GPU inference. The scripts can fall back to `eager`, but this repository's example config uses `flash_attention_2` after FlashAttention is installed.
 
 ## Installation
 
@@ -68,11 +68,35 @@ UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python -e . \
   --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-Optional FlashAttention installation:
+Optional FlashAttention installation for the tested `torch 2.12.0+cu130` environment:
 
 ```bash
-UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python flash-attn --no-build-isolation \
+UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python \
+  ninja wheel \
+  nvidia-cuda-nvcc==13.0.* \
+  nvidia-cuda-cccl==13.0.* \
+  nvidia-cuda-crt==13.0.* \
+  nvidia-nvvm==13.0.* \
   --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+ln -sf libcudart.so.13 \
+  .venv/lib/python3.11/site-packages/nvidia/cu13/lib/libcudart.so
+
+CUDA_HOME="$PWD/.venv/lib/python3.11/site-packages/nvidia/cu13" \
+PATH="$PWD/.venv/lib/python3.11/site-packages/nvidia/cu13/bin:$PATH" \
+LD_LIBRARY_PATH="$PWD/.venv/lib/python3.11/site-packages/nvidia/cu13/lib:$LD_LIBRARY_PATH" \
+MAX_JOBS=4 \
+NVCC_THREADS=2 \
+FLASH_ATTN_CUDA_ARCHS=80 \
+UV_CACHE_DIR=.uv-cache \
+uv pip install --python .venv/bin/python flash-attn --no-build-isolation \
+  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+Verify the installation:
+
+```bash
+.venv/bin/python -c "import flash_attn, flash_attn_2_cuda; print(flash_attn.__version__)"
 ```
 
 ## Download Model Weights
@@ -125,7 +149,7 @@ output = "outputs/result.wav"
 language = "Chinese"
 device = "cuda:0"
 dtype = "bfloat16"
-attn_implementation = "eager"
+attn_implementation = "flash_attention_2"
 ```
 
 For mixed Chinese, English, and Japanese text, use:
@@ -212,7 +236,7 @@ Run a low-memory 1.7B fine-tune. This mode freezes most model weights and update
   --lr 2e-5 \
   --num_epochs 3 \
   --speaker_name M3 \
-  --attn_implementation eager \
+  --attn_implementation flash_attention_2 \
   --trainable_scope embeddings_and_heads \
   --gradient_accumulation_steps 4 \
   --log_steps 1
@@ -236,7 +260,7 @@ Use the CustomVoice generation script with the fine-tuned checkpoint. Speaker na
   --text "你好，这是训练后的声音测试。" \
   --output outputs/test_M3.wav \
   --device cuda:0 \
-  --attn_implementation eager
+  --attn_implementation flash_attention_2
 ```
 
 For mixed Chinese, English, and Japanese text, set:
@@ -244,6 +268,18 @@ For mixed Chinese, English, and Japanese text, set:
 ```bash
 --language Auto
 ```
+
+## FlashAttention Benchmark
+
+On an NVIDIA GeForce RTX 4080 SUPER with the fine-tuned `outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2` checkpoint, FlashAttention 2 improved generation speed by about 11% to 23% depending on the prompt and sampling settings:
+
+| Scenario | `eager` mean | `flash_attention_2` mean | Speedup |
+| --- | ---: | ---: | ---: |
+| Short text, sampling enabled | 9.034s | 7.992s | 1.13x |
+| Short text, main sampling disabled | 10.423s | 8.507s | 1.23x |
+| Longer text, sampling enabled | 21.680s | 19.138s | 1.13x |
+
+Peak GPU memory was similar in these runs, around 4.1 GB to 4.2 GB. TTS generation includes more than attention, such as autoregressive codec generation and waveform decoding, so the practical speedup is moderate rather than a multi-fold jump.
 
 ## Verify Reference Audio
 

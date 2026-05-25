@@ -50,7 +50,7 @@ samples/
 - 已下载 Qwen3-TTS 模型权重，或可以从 ModelScope / Hugging Face 下载
 - 使用 `uv` 管理 Python 环境
 
-`flash-attn` 是可选加速项。默认 `eager` attention 也可以运行。安装 `flash-attn` 需要 CUDA Toolkit 开发环境，也就是系统里有 `nvcc` 和 `CUDA_HOME`。
+`flash-attn` 是可选但推荐的 GPU 推理加速项。脚本仍然可以回退到 `eager`，但安装 FlashAttention 后，本仓库示例配置默认使用 `flash_attention_2`。
 
 ## 安装
 
@@ -68,11 +68,35 @@ UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python -e . \
   --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-可选安装 FlashAttention：
+当前测试环境是 `torch 2.12.0+cu130`，可按下面方式安装 FlashAttention：
 
 ```bash
-UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python flash-attn --no-build-isolation \
+UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python \
+  ninja wheel \
+  nvidia-cuda-nvcc==13.0.* \
+  nvidia-cuda-cccl==13.0.* \
+  nvidia-cuda-crt==13.0.* \
+  nvidia-nvvm==13.0.* \
   --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+ln -sf libcudart.so.13 \
+  .venv/lib/python3.11/site-packages/nvidia/cu13/lib/libcudart.so
+
+CUDA_HOME="$PWD/.venv/lib/python3.11/site-packages/nvidia/cu13" \
+PATH="$PWD/.venv/lib/python3.11/site-packages/nvidia/cu13/bin:$PATH" \
+LD_LIBRARY_PATH="$PWD/.venv/lib/python3.11/site-packages/nvidia/cu13/lib:$LD_LIBRARY_PATH" \
+MAX_JOBS=4 \
+NVCC_THREADS=2 \
+FLASH_ATTN_CUDA_ARCHS=80 \
+UV_CACHE_DIR=.uv-cache \
+uv pip install --python .venv/bin/python flash-attn --no-build-isolation \
+  --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+安装后可以这样验证：
+
+```bash
+.venv/bin/python -c "import flash_attn, flash_attn_2_cuda; print(flash_attn.__version__)"
 ```
 
 ## 下载模型
@@ -125,7 +149,7 @@ output = "outputs/result.wav"
 language = "Chinese"
 device = "cuda:0"
 dtype = "bfloat16"
-attn_implementation = "eager"
+attn_implementation = "flash_attention_2"
 ```
 
 如果文本中混合中文、英文、日文，建议使用：
@@ -212,7 +236,7 @@ Qwen3-TTS 微调需要短音频和逐字准确的文本。每一行应包含音�
   --lr 2e-5 \
   --num_epochs 3 \
   --speaker_name M3 \
-  --attn_implementation eager \
+  --attn_implementation flash_attention_2 \
   --trainable_scope embeddings_and_heads \
   --gradient_accumulation_steps 4 \
   --log_steps 1
@@ -236,7 +260,7 @@ outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2
   --text "你好，这是训练后的声音测试。" \
   --output outputs/test_M3.wav \
   --device cuda:0 \
-  --attn_implementation eager
+  --attn_implementation flash_attention_2
 ```
 
 如果文本里混合中文、英文、日文，使用：
@@ -244,6 +268,18 @@ outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2
 ```bash
 --language Auto
 ```
+
+## FlashAttention 速度测试
+
+在 NVIDIA GeForce RTX 4080 SUPER 上，使用微调后的 `outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2` checkpoint 测试，`flash_attention_2` 相比 `eager` 的生成速度提升大约在 11% 到 23% 之间，具体取决于文本长度和采样设置：
+
+| 场景 | `eager` 平均耗时 | `flash_attention_2` 平均耗时 | 加速 |
+| --- | ---: | ---: | ---: |
+| 短文本，开启采样 | 9.034s | 7.992s | 1.13x |
+| 短文本，关闭主采样 | 10.423s | 8.507s | 1.23x |
+| 较长文本，开启采样 | 21.680s | 19.138s | 1.13x |
+
+这些测试里的峰值显存基本接近，约 4.1GB 到 4.2GB。TTS 生成不仅包含 attention，还包括自回归 codec 生成、采样策略和波形解码，所以实际加速是中等幅度，不是数倍提升。
 
 ## 检查参考音频
 
