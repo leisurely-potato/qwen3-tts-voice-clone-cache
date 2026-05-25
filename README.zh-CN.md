@@ -27,6 +27,8 @@ Qwen3-TTS 支持通过参考音频进行音色克隆。当你只有参考音频�
 ```text
 configs/voice_clone_cached.toml       配置文件示例
 scripts/voice_clone_cached.py         主命令行脚本
+scripts/generate_custom_voice.py      使用微调后的 CustomVoice checkpoint 生成音频
+scripts/resample_dataset_24k.py       将 JSONL 数据集音频转换为 24 kHz WAV
 scripts/smoke_test_voice_clone_cached.py
 scripts/README_voice_clone_cached.md  脚本详细说明
 ```
@@ -35,6 +37,7 @@ scripts/README_voice_clone_cached.md  脚本详细说明
 
 ```text
 models/
+data/
 caches/
 outputs/
 samples/
@@ -83,6 +86,10 @@ UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python modelscope \
 .venv/bin/modelscope download \
   --model Qwen/Qwen3-TTS-12Hz-1.7B-Base \
   --local_dir models/Qwen3-TTS-12Hz-1.7B-Base
+
+.venv/bin/modelscope download \
+  --model Qwen/Qwen3-TTS-Tokenizer-12Hz \
+  --local_dir models/Qwen3-TTS-Tokenizer-12Hz
 ```
 
 也可以使用 Hugging Face 镜像：
@@ -92,6 +99,11 @@ HF_ENDPOINT=https://hf-mirror.com \
 .venv/bin/huggingface-cli download \
   Qwen/Qwen3-TTS-12Hz-1.7B-Base \
   --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
+
+HF_ENDPOINT=https://hf-mirror.com \
+.venv/bin/huggingface-cli download \
+  Qwen/Qwen3-TTS-Tokenizer-12Hz \
+  --local-dir models/Qwen3-TTS-Tokenizer-12Hz
 ```
 
 ## 配置
@@ -159,6 +171,78 @@ language = "Auto"
 .venv/bin/python scripts/voice_clone_cached.py \
   --config configs/voice_clone_cached.toml \
   --force-rebuild
+```
+
+## 微调一个自定义音色
+
+Qwen3-TTS 微调需要短音频和逐字准确的文本。每一行应包含音频路径、文本和参考音频路径：
+
+```json
+{"audio":"data/M3/3星结束行动.wav","text":"少し待て。組織サンプルを採取する必要がある。","ref_audio":"data/M3/交谈1.wav"}
+```
+
+微调数据加载器要求音频是 24 kHz 单声道 WAV。建议保留原始数据不动，另外生成一份 24 kHz 训练副本：
+
+```bash
+.venv/bin/python scripts/resample_dataset_24k.py \
+  --input_jsonl data/M3/train_raw.jsonl \
+  --output_dir data/M3_24k \
+  --output_jsonl train_raw.jsonl \
+  --sample_rate 24000
+```
+
+生成训练需要的 12 Hz audio codes：
+
+```bash
+.venv/bin/python finetuning/prepare_data.py \
+  --device cuda:0 \
+  --tokenizer_model_path models/Qwen3-TTS-Tokenizer-12Hz \
+  --input_jsonl data/M3_24k/train_raw.jsonl \
+  --output_jsonl data/M3_24k/train_with_codes.jsonl
+```
+
+运行 1.7B 低显存微调。这个模式会冻结大部分模型权重，只更新 text/codec embedding 和 code predictor 的 embedding/head/projection，在 16GB 显存的 GPU 上更容易跑通：
+
+```bash
+.venv/bin/python finetuning/sft_12hz.py \
+  --init_model_path models/Qwen3-TTS-12Hz-1.7B-Base \
+  --output_model_path outputs/finetune_M3_24k_lowmem \
+  --train_jsonl data/M3_24k/train_with_codes.jsonl \
+  --batch_size 1 \
+  --lr 2e-5 \
+  --num_epochs 3 \
+  --speaker_name M3 \
+  --attn_implementation eager \
+  --trainable_scope embeddings_and_heads \
+  --gradient_accumulation_steps 4 \
+  --log_steps 1
+```
+
+这个示例最终 checkpoint 是：
+
+```text
+outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2
+```
+
+## 使用微调后的音色生成音频
+
+使用 CustomVoice 生成脚本即可。注意：checkpoint 中的 speaker 名会以小写保存，所以用 `--speaker_name M3` 训练出来后，生成时使用 `--speaker m3`：
+
+```bash
+.venv/bin/python scripts/generate_custom_voice.py \
+  --model outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2 \
+  --speaker m3 \
+  --language Chinese \
+  --text "你好，这是训练后的声音测试。" \
+  --output outputs/test_M3.wav \
+  --device cuda:0 \
+  --attn_implementation eager
+```
+
+如果文本里混合中文、英文、日文，使用：
+
+```bash
+--language Auto
 ```
 
 ## 检查参考音频

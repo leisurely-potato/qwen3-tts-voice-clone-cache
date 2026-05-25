@@ -27,6 +27,8 @@ The first run creates a cache file from the reference audio. Later runs load tha
 ```text
 configs/voice_clone_cached.toml       Example configuration
 scripts/voice_clone_cached.py         Main CLI
+scripts/generate_custom_voice.py      Generate audio from a fine-tuned CustomVoice checkpoint
+scripts/resample_dataset_24k.py       Convert a JSONL dataset audio set to 24 kHz WAV
 scripts/smoke_test_voice_clone_cached.py
 scripts/README_voice_clone_cached.md  Detailed script notes
 ```
@@ -35,6 +37,7 @@ Local model weights, voice caches, generated audio, and sample audio files are i
 
 ```text
 models/
+data/
 caches/
 outputs/
 samples/
@@ -83,6 +86,10 @@ UV_CACHE_DIR=.uv-cache uv pip install --python .venv/bin/python modelscope \
 .venv/bin/modelscope download \
   --model Qwen/Qwen3-TTS-12Hz-1.7B-Base \
   --local_dir models/Qwen3-TTS-12Hz-1.7B-Base
+
+.venv/bin/modelscope download \
+  --model Qwen/Qwen3-TTS-Tokenizer-12Hz \
+  --local_dir models/Qwen3-TTS-Tokenizer-12Hz
 ```
 
 Hugging Face mirror alternative:
@@ -92,6 +99,11 @@ HF_ENDPOINT=https://hf-mirror.com \
 .venv/bin/huggingface-cli download \
   Qwen/Qwen3-TTS-12Hz-1.7B-Base \
   --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
+
+HF_ENDPOINT=https://hf-mirror.com \
+.venv/bin/huggingface-cli download \
+  Qwen/Qwen3-TTS-Tokenizer-12Hz \
+  --local-dir models/Qwen3-TTS-Tokenizer-12Hz
 ```
 
 ## Configure
@@ -159,6 +171,78 @@ Force cache rebuild:
 .venv/bin/python scripts/voice_clone_cached.py \
   --config configs/voice_clone_cached.toml \
   --force-rebuild
+```
+
+## Fine-Tune a Custom Voice
+
+Qwen3-TTS fine-tuning expects short audio clips with exact transcripts. Each line should contain an audio path, transcript text, and a reference audio path:
+
+```json
+{"audio":"data/M3/3星结束行动.wav","text":"少し待て。組織サンプルを採取する必要がある。","ref_audio":"data/M3/交谈1.wav"}
+```
+
+The fine-tuning dataset loader requires 24 kHz mono WAV files. Keep the original dataset unchanged and create a 24 kHz copy:
+
+```bash
+.venv/bin/python scripts/resample_dataset_24k.py \
+  --input_jsonl data/M3/train_raw.jsonl \
+  --output_dir data/M3_24k \
+  --output_jsonl train_raw.jsonl \
+  --sample_rate 24000
+```
+
+Generate 12 Hz audio codes for training:
+
+```bash
+.venv/bin/python finetuning/prepare_data.py \
+  --device cuda:0 \
+  --tokenizer_model_path models/Qwen3-TTS-Tokenizer-12Hz \
+  --input_jsonl data/M3_24k/train_raw.jsonl \
+  --output_jsonl data/M3_24k/train_with_codes.jsonl
+```
+
+Run a low-memory 1.7B fine-tune. This mode freezes most model weights and updates the text/codec embeddings and code predictor heads, which is practical on a 16 GB GPU:
+
+```bash
+.venv/bin/python finetuning/sft_12hz.py \
+  --init_model_path models/Qwen3-TTS-12Hz-1.7B-Base \
+  --output_model_path outputs/finetune_M3_24k_lowmem \
+  --train_jsonl data/M3_24k/train_with_codes.jsonl \
+  --batch_size 1 \
+  --lr 2e-5 \
+  --num_epochs 3 \
+  --speaker_name M3 \
+  --attn_implementation eager \
+  --trainable_scope embeddings_and_heads \
+  --gradient_accumulation_steps 4 \
+  --log_steps 1
+```
+
+The final checkpoint from this example is:
+
+```text
+outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2
+```
+
+## Generate Audio From a Fine-Tuned Voice
+
+Use the CustomVoice generation script with the fine-tuned checkpoint. Speaker names are stored in lowercase, so use `m3` for a checkpoint trained with `--speaker_name M3`:
+
+```bash
+.venv/bin/python scripts/generate_custom_voice.py \
+  --model outputs/finetune_M3_24k_lowmem/checkpoint-epoch-2 \
+  --speaker m3 \
+  --language Chinese \
+  --text "你好，这是训练后的声音测试。" \
+  --output outputs/test_M3.wav \
+  --device cuda:0 \
+  --attn_implementation eager
+```
+
+For mixed Chinese, English, and Japanese text, set:
+
+```bash
+--language Auto
 ```
 
 ## Verify Reference Audio

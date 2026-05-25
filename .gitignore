@@ -30,6 +30,7 @@ models/
 caches/
 outputs/
 samples/
+data/
 
 # Audio/media files are usually local test data.
 *.wav

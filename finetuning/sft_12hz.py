@@ -39,25 +39,57 @@ def train():
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--speaker_name", type=str, default="speaker_test")
+    parser.add_argument("--attn_implementation", type=str, default="eager")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--log_steps", type=int, default=10)
+    parser.add_argument(
+        "--trainable_scope",
+        type=str,
+        default="full",
+        choices=["full", "embeddings_and_heads"],
+    )
     args = parser.parse_args()
 
-    accelerator = Accelerator(gradient_accumulation_steps=4, mixed_precision="bf16", log_with="tensorboard")
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision="bf16",
+        log_with="tensorboard",
+    )
 
     MODEL_PATH = args.init_model_path
 
     qwen3tts = Qwen3TTSModel.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation=args.attn_implementation,
     )
     config = AutoConfig.from_pretrained(MODEL_PATH)
+
+    if args.trainable_scope == "embeddings_and_heads":
+        trainable_prefixes = (
+            "talker.model.codec_embedding",
+            "talker.model.text_embedding",
+            "talker.code_predictor.model.codec_embedding",
+            "talker.code_predictor.lm_head",
+            "talker.code_predictor.small_to_mtp_projection",
+        )
+        for name, parameter in qwen3tts.model.named_parameters():
+            parameter.requires_grad = name.startswith(trainable_prefixes)
+
+    trainable_parameters = [p for p in qwen3tts.model.parameters() if p.requires_grad]
+    trainable_parameter_count = sum(p.numel() for p in trainable_parameters)
+    total_parameter_count = sum(p.numel() for p in qwen3tts.model.parameters())
+    accelerator.print(
+        f"Trainable parameters: {trainable_parameter_count:,} / {total_parameter_count:,} "
+        f"({100 * trainable_parameter_count / total_parameter_count:.2f}%)"
+    )
 
     train_data = open(args.train_jsonl).readlines()
     train_data = [json.loads(line) for line in train_data]
     dataset = TTSDataset(train_data, qwen3tts.processor, config)
     train_dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=dataset.collate_fn)
 
-    optimizer = AdamW(qwen3tts.model.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = AdamW(trainable_parameters, lr=args.lr, weight_decay=0.01)
 
     model, optimizer, train_dataloader = accelerator.prepare(
         qwen3tts.model, optimizer, train_dataloader
@@ -120,7 +152,7 @@ def train():
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if step % 10 == 0:
+            if step % args.log_steps == 0:
                 accelerator.print(f"Epoch {epoch} | Step {step} | Loss: {loss.item():.4f}")
 
         if accelerator.is_main_process:
@@ -132,12 +164,13 @@ def train():
             with open(input_config_file, 'r', encoding='utf-8') as f:
                 config_dict = json.load(f)
             config_dict["tts_model_type"] = "custom_voice"
+            speaker_key = args.speaker_name.lower()
             talker_config = config_dict.get("talker_config", {})
             talker_config["spk_id"] = {
-                args.speaker_name: 3000
+                speaker_key: 3000
             }
             talker_config["spk_is_dialect"] = {
-                args.speaker_name: False
+                speaker_key: False
             }
             config_dict["talker_config"] = talker_config
 
